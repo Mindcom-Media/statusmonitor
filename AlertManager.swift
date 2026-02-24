@@ -1,31 +1,34 @@
 import Foundation
 import AppKit
-import AudioToolbox
+import AVFoundation
 
 final class AlertManager: ObservableObject {
     @Published var isFlashing = false
     @Published var flashCycle = 0
     private var flashTimer: Timer?
-    private var bellTimer: Timer?
+    private var audioPlayer: AVAudioPlayer?
+
+    init() {
+        // Load alert sound — try bundle first, fallback to project directory
+        if let bundleURL = Bundle.module.url(forResource: "alert", withExtension: "mp3") {
+            audioPlayer = try? AVAudioPlayer(contentsOf: bundleURL)
+        } else {
+            let fallback = URL(fileURLWithPath: FileManager.default.homeDirectoryForCurrentUser.path)
+                .appendingPathComponent("repos/statusmonitor/alert.mp3")
+            audioPlayer = try? AVAudioPlayer(contentsOf: fallback)
+        }
+        audioPlayer?.prepareToPlay()
+    }
 
     func triggerAlert() {
-        // Play alert sound 3 times with spacing
-        AudioServicesPlayAlertSound(kSystemSoundID_UserPreferredAlert)
-        var bellCount = 0
-        bellTimer?.invalidate()
-        bellTimer = Timer.scheduledTimer(withTimeInterval: 0.6, repeats: true) { [weak self] timer in
-            bellCount += 1
-            AudioServicesPlayAlertSound(kSystemSoundID_UserPreferredAlert)
-            if bellCount >= 2 {
-                timer.invalidate()
-                self?.bellTimer = nil
-            }
-        }
+        // Play the undertaker's bell once
+        audioPlayer?.currentTime = 0
+        audioPlayer?.play()
 
-        // Bounce dock icon aggressively
+        // Bounce dock icon
         NSApp.requestUserAttention(.criticalRequest)
 
-        // Start rapid flash cycle — toggles on/off 8 times over 4 seconds
+        // Start rapid flash cycle
         startFlashing()
     }
 

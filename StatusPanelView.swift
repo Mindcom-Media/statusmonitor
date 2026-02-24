@@ -39,6 +39,11 @@ struct StatusPanelView: View {
                     VStack(spacing: 1) {
                         ForEach(monitor.sessions) { session in
                             SessionRowView(session: session, isFlashing: alertManager.isFlashing)
+                                .onTapGesture {
+                                    guard !session.tty.isEmpty else { return }
+                                    SessionMonitor.focusTerminalWindow(tty: session.tty)
+                                }
+                                .cursor(.pointingHand)
                         }
                     }
                     .padding(.vertical, 4)
@@ -46,7 +51,7 @@ struct StatusPanelView: View {
                 .frame(maxHeight: 300)
             }
         }
-        .frame(width: 280)
+        .frame(width: 300)
         .background(
             RoundedRectangle(cornerRadius: 12)
                 .fill(alertManager.isFlashing ? Color.red.opacity(0.15) : Color.black.opacity(0.9))
@@ -64,17 +69,26 @@ struct StatusPanelView: View {
     }
 }
 
+// Cursor modifier for macOS
+extension View {
+    func cursor(_ cursor: NSCursor) -> some View {
+        self.onHover { inside in
+            if inside { cursor.push() } else { NSCursor.pop() }
+        }
+    }
+}
+
 struct SessionRowView: View {
     let session: ClaudeSession
     let isFlashing: Bool
     @State private var isPulsing = false
+    @State private var isHovered = false
 
     var body: some View {
         HStack(spacing: 10) {
-            // Status dot with pulse rings for attention
+            // Status dot with pulse rings
             ZStack {
                 if session.needsAttention {
-                    // Outer pulse ring
                     Circle()
                         .stroke(statusColor.opacity(0.4), lineWidth: 2)
                         .frame(width: 20, height: 20)
@@ -84,7 +98,6 @@ struct SessionRowView: View {
                             .easeOut(duration: 1.2).repeatForever(autoreverses: false),
                             value: isPulsing
                         )
-                    // Inner pulse ring
                     Circle()
                         .stroke(statusColor.opacity(0.6), lineWidth: 1.5)
                         .frame(width: 14, height: 14)
@@ -95,7 +108,6 @@ struct SessionRowView: View {
                             value: isPulsing
                         )
                 }
-                // Core dot
                 Circle()
                     .fill(statusColor)
                     .frame(width: 10, height: 10)
@@ -111,9 +123,11 @@ struct SessionRowView: View {
 
             VStack(alignment: .leading, spacing: 2) {
                 HStack {
-                    Text(session.projectName)
+                    Text(session.displayName)
                         .font(.system(size: 12, weight: .semibold))
                         .foregroundColor(session.needsAttention && isFlashing ? .red : .white)
+                        .underline(isHovered)
+                        .lineLimit(1)
                     Spacer()
                     Text(session.status.rawValue)
                         .font(.system(size: 10, weight: .bold))
@@ -131,8 +145,11 @@ struct SessionRowView: View {
         .background(
             session.needsAttention
                 ? (isFlashing ? Color.red.opacity(0.2) : Color.red.opacity(0.08))
-                : Color.clear
+                : (isHovered ? Color.white.opacity(0.05) : Color.clear)
         )
+        .onHover { hovering in
+            isHovered = hovering
+        }
     }
 
     private var statusColor: Color {

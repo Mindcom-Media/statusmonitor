@@ -32,12 +32,14 @@ final class SessionMonitor: ObservableObject {
             guard let self else { return }
             let discovered = self.discoverProcesses()
             self.mapPIDsToDebugLogs(pids: discovered.map(\.pid))
+            let windowNames = self.getTerminalWindowNames()
             var updated: [ClaudeSession] = []
 
-            for (pid, cwd) in discovered {
-                guard let uuid = self.pidToUUID[pid] else { continue }
+            for proc in discovered {
+                guard let uuid = self.pidToUUID[proc.pid] else { continue }
                 var session = self.sessions.first(where: { $0.id == uuid })
-                    ?? ClaudeSession(id: uuid, pid: pid, projectPath: cwd)
+                    ?? ClaudeSession(id: uuid, pid: proc.pid, projectPath: proc.cwd, tty: proc.tty)
+                session.windowName = windowNames[proc.tty] ?? ""
                 session = self.updateSessionState(session: session, uuid: uuid)
                 updated.append(session)
             }
@@ -67,32 +69,93 @@ final class SessionMonitor: ObservableObject {
 
     // MARK: - Process Discovery
 
-    private func discoverProcesses() -> [(pid: Int, cwd: String)] {
-        let psOutput = runCommand("/bin/ps", arguments: ["-eo", "pid,command"])
-        var claudePIDs: [Int] = []
+    private func discoverProcesses() -> [(pid: Int, cwd: String, tty: String)] {
+        let psOutput = runCommand("/bin/ps", arguments: ["-eo", "pid,tty,command"])
+        var claudeProcs: [(pid: Int, tty: String)] = []
 
         for line in psOutput.components(separatedBy: "\n") {
             let trimmed = line.trimmingCharacters(in: .whitespaces)
-            let parts = trimmed.split(separator: " ", maxSplits: 1)
-            guard parts.count == 2,
+            let parts = trimmed.split(separator: " ", maxSplits: 2).map(String.init)
+            guard parts.count == 3,
                   let pid = Int(parts[0]) else { continue }
-            let cmd = parts[1].trimmingCharacters(in: .whitespaces)
+            let cmd = parts[2].trimmingCharacters(in: .whitespaces)
             guard cmd == "claude" else { continue }
-            claudePIDs.append(pid)
+            claudeProcs.append((pid: pid, tty: parts[1]))
         }
 
-        var results: [(pid: Int, cwd: String)] = []
-        for pid in claudePIDs {
-            let lsofOutput = runCommand("/usr/sbin/lsof", arguments: ["-p", "\(pid)", "-a", "-d", "cwd", "-F", "n"])
+        var results: [(pid: Int, cwd: String, tty: String)] = []
+        for proc in claudeProcs {
+            let lsofOutput = runCommand("/usr/sbin/lsof", arguments: ["-p", "\(proc.pid)", "-a", "-d", "cwd", "-F", "n"])
             for line in lsofOutput.components(separatedBy: "\n") {
                 if line.hasPrefix("n/") {
                     let cwd = String(line.dropFirst())
-                    results.append((pid: pid, cwd: cwd))
+                    results.append((pid: proc.pid, cwd: cwd, tty: proc.tty))
                     break
                 }
             }
         }
         return results
+    }
+
+    /// Get Terminal window names mapped by TTY via AppleScript
+    private func getTerminalWindowNames() -> [String: String] {
+        let script = """
+        tell application "Terminal"
+            set output to ""
+            set winCount to count of windows
+            repeat with i from 1 to winCount
+                try
+                    set w to window i
+                    set wName to name of w
+                    repeat with t in tabs of w
+                        set ttyName to tty of t
+                        set output to output & ttyName & "|||" & wName & linefeed
+                    end repeat
+                end try
+            end repeat
+            return output
+        end tell
+        """
+        let result = runCommand("/usr/bin/osascript", arguments: ["-e", script])
+        var mapping: [String: String] = [:]
+        for line in result.components(separatedBy: "\n") {
+            let parts = line.components(separatedBy: "|||")
+            guard parts.count == 2 else { continue }
+            // TTY from AppleScript: "/dev/ttys007", from ps: "ttys007"
+            let tty = parts[0].trimmingCharacters(in: .whitespaces)
+                .replacingOccurrences(of: "/dev/", with: "")
+            mapping[tty] = parts[1].trimmingCharacters(in: .whitespaces)
+        }
+        return mapping
+    }
+
+    /// Focus a Terminal window by its TTY
+    static func focusTerminalWindow(tty: String) {
+        let script = """
+        tell application "Terminal"
+            set winCount to count of windows
+            repeat with i from 1 to winCount
+                try
+                    set w to window i
+                    repeat with t in tabs of w
+                        if tty of t is "/dev/\(tty)" then
+                            set frontmost of w to true
+                            set selected tab of w to t
+                            activate
+                            return "focused"
+                        end if
+                    end repeat
+                end try
+            end repeat
+            return "not found"
+        end tell
+        """
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/usr/bin/osascript")
+        process.arguments = ["-e", script]
+        process.standardOutput = FileHandle.nullDevice
+        process.standardError = FileHandle.nullDevice
+        try? process.run()
     }
 
     // MARK: - Debug Log Mapping

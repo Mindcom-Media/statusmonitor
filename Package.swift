@@ -16,6 +16,9 @@ let package = Package(
                 "SessionMonitor.swift",
                 "ClaudeSession.swift",
                 "AlertManager.swift"
+            ],
+            resources: [
+                .copy("alert.mp3")
             ]
         )
     ]
