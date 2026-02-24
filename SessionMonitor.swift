@@ -131,31 +131,19 @@ final class SessionMonitor: ObservableObject {
 
     /// Focus a Terminal window by its TTY
     static func focusTerminalWindow(tty: String) {
-        let script = """
-        tell application "Terminal"
-            set winCount to count of windows
-            repeat with i from 1 to winCount
-                try
-                    set w to window i
-                    repeat with t in tabs of w
-                        if tty of t is "/dev/\(tty)" then
-                            set frontmost of w to true
-                            set selected tab of w to t
-                            activate
-                            return "focused"
-                        end if
-                    end repeat
-                end try
-            end repeat
-            return "not found"
-        end tell
-        """
-        let process = Process()
-        process.executableURL = URL(fileURLWithPath: "/usr/bin/osascript")
-        process.arguments = ["-e", script]
-        process.standardOutput = FileHandle.nullDevice
-        process.standardError = FileHandle.nullDevice
-        try? process.run()
+        let devTTY = "/dev/\(tty)"
+        let script = "tell application \"Terminal\"\nset winCount to count of windows\nrepeat with i from 1 to winCount\ntry\nset w to window i\nrepeat with t in tabs of w\nif tty of t is \"\(devTTY)\" then\nset frontmost of w to true\nset selected tab of w to t\nactivate\nreturn \"focused\"\nend if\nend repeat\nend try\nend repeat\nreturn \"not found\"\nend tell"
+        DispatchQueue.global(qos: .userInitiated).async {
+            let process = Process()
+            process.executableURL = URL(fileURLWithPath: "/usr/bin/osascript")
+            process.arguments = ["-e", script]
+            process.standardOutput = FileHandle.nullDevice
+            process.standardError = FileHandle.nullDevice
+            do {
+                try process.run()
+                process.waitUntilExit()
+            } catch {}
+        }
     }
 
     // MARK: - Debug Log Mapping
@@ -165,74 +153,19 @@ final class SessionMonitor: ObservableObject {
         guard !unmapped.isEmpty else { return }
 
         let fm = FileManager.default
-        guard let files = try? fm.contentsOfDirectory(atPath: debugDir) else { return }
 
-        // Sort by modification time (most recent first) to find active logs faster
-        let sortedFiles = files.filter { $0.hasSuffix(".txt") }.sorted { a, b in
-            let pathA = "\(debugDir)/\(a)"
-            let pathB = "\(debugDir)/\(b)"
-            let modA = (try? fm.attributesOfItem(atPath: pathA)[.modificationDate] as? Date) ?? .distantPast
-            let modB = (try? fm.attributesOfItem(atPath: pathB)[.modificationDate] as? Date) ?? .distantPast
-            return modA > modB
-        }
-
-        // Only check recently modified logs (last 24 hours)
-        let cutoff = Date().addingTimeInterval(-86400)
-
-        for file in sortedFiles {
-            let uuid = String(file.dropLast(4))
-            if pidToUUID.values.contains(uuid) { continue }
-
-            let path = "\(debugDir)/\(file)"
-
-            if let attrs = try? fm.attributesOfItem(atPath: path),
-               let modDate = attrs[.modificationDate] as? Date,
-               modDate < cutoff { break }
-
-            guard let handle = FileHandle(forReadingAtPath: path) else { continue }
-            defer { handle.closeFile() }
-
-            // Strategy 1: Check header for "Acquired PID lock ... (PID XXXXX)"
-            let headerData = handle.readData(ofLength: 3072)
-            if let header = String(data: headerData, encoding: .utf8) {
-                for pid in unmapped where pidToUUID[pid] == nil {
-                    if header.contains("Acquired PID lock") && header.contains("PID \(pid)") {
-                        pidToUUID[pid] = uuid
-                    }
-                }
-            }
-
-            // Strategy 2: Check tail for "claude.json.tmp.{PID}" pattern
-            let stillUnmapped = unmapped.filter { pidToUUID[$0] == nil }
-            guard !stillUnmapped.isEmpty else { return }
-
-            handle.seekToEndOfFile()
-            let fileSize = handle.offsetInFile
-            let tailSize: UInt64 = min(fileSize, 32768)
-            handle.seek(toFileOffset: fileSize - tailSize)
-            let tailData = handle.readDataToEndOfFile()
-
-            if let tail = String(data: tailData, encoding: .utf8) {
-                for pid in stillUnmapped {
-                    if tail.contains("claude.json.tmp.\(pid)") {
-                        pidToUUID[pid] = uuid
-                    }
-                }
-            }
-        }
-
-        // Strategy 3: Grep fallback for any still-unmapped PIDs
-        let finalUnmapped = unmapped.filter { pidToUUID[$0] == nil }
-        let fm2 = FileManager.default
-        for pid in finalUnmapped {
+        // Use grep to find all debug logs referencing each PID, then pick the
+        // most recently modified match. This handles PID reuse correctly —
+        // the current session's log will always be the most recently modified.
+        for pid in unmapped {
             let grepOutput = runCommand("/usr/bin/grep", arguments: [
-                "-rl", "-E", "(claude\\.json\\.tmp\\.\(pid)|PID \(pid))", debugDir
+                "-rl", "-E", "(claude\\.json\\.tmp\\.\(pid)|Acquired PID lock.*PID \(pid))", debugDir
             ])
             let matchingFiles = grepOutput.components(separatedBy: "\n")
                 .filter { !$0.isEmpty && $0.hasSuffix(".txt") }
                 .sorted { a, b in
-                    let modA = (try? fm2.attributesOfItem(atPath: a)[.modificationDate] as? Date) ?? .distantPast
-                    let modB = (try? fm2.attributesOfItem(atPath: b)[.modificationDate] as? Date) ?? .distantPast
+                    let modA = (try? fm.attributesOfItem(atPath: a)[.modificationDate] as? Date) ?? .distantPast
+                    let modB = (try? fm.attributesOfItem(atPath: b)[.modificationDate] as? Date) ?? .distantPast
                     return modA > modB
                 }
             if let bestMatch = matchingFiles.first {
