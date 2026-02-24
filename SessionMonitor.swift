@@ -215,21 +215,30 @@ final class SessionMonitor: ObservableObject {
         var lastStreamStarted: Date?
         var lastToolHook: Date?
         var lastSpawningShell: Date?
-        var lastLogTimestamp: Date?
+        var lastMeaningfulActivity: Date?
 
         for line in lines {
             guard let ts = parseTimestamp(line) else { continue }
-            lastLogTimestamp = ts
 
             if line.contains("Notification with query: permission_prompt") {
                 lastPermissionPrompt = ts
+                lastMeaningfulActivity = ts
             } else if line.contains("Stream started") {
                 lastStreamStarted = ts
+                lastMeaningfulActivity = ts
             } else if line.contains("executePreToolHooks called") {
                 lastToolHook = ts
+                lastMeaningfulActivity = ts
             } else if line.contains("Spawning shell") {
                 lastSpawningShell = ts
+                lastMeaningfulActivity = ts
+            } else if line.contains("UserPromptSubmit") {
+                lastMeaningfulActivity = ts
+            } else if line.contains("[API:request]") || line.contains("attribution header") {
+                lastMeaningfulActivity = ts
             }
+            // Ignore noise: "Fast mode unavailable", "High write ratio",
+            // version checks, symlink updates — these don't indicate real work
         }
 
         let now = Date()
@@ -237,21 +246,24 @@ final class SessionMonitor: ObservableObject {
 
         if let permTime = lastPermissionPrompt,
            (mostRecentWork == nil || permTime > mostRecentWork!) {
+            // Permission prompt is the most recent significant event
             session.status = .waiting
             session.needsAttention = true
             session.statusDetail = "Needs permission"
             if session.needsAttentionSince == nil {
                 session.needsAttentionSince = permTime
             }
-        } else if let lastLog = lastLogTimestamp, now.timeIntervalSince(lastLog) > 60 {
+        } else if let lastWork = lastMeaningfulActivity, now.timeIntervalSince(lastWork) > 30 {
+            // No meaningful activity for 30+ seconds — Claude is done
             session.status = .idle
             session.needsAttention = true
-            session.statusDetail = "No activity \(formatDuration(now.timeIntervalSince(lastLog)))"
+            session.statusDetail = "Waiting for input \(formatDuration(now.timeIntervalSince(lastWork)))"
             if session.needsAttentionSince == nil {
-                session.needsAttentionSince = lastLog
+                session.needsAttentionSince = lastWork
             }
-        } else if let workTime = mostRecentWork, let lastLog = lastLogTimestamp,
-                  now.timeIntervalSince(lastLog) < 30 {
+        } else if let workTime = mostRecentWork, let lastWork = lastMeaningfulActivity,
+                  now.timeIntervalSince(lastWork) < 30 {
+            // Recent meaningful work
             session.status = .active
             session.needsAttention = false
             session.needsAttentionSince = nil
@@ -262,6 +274,14 @@ final class SessionMonitor: ObservableObject {
             } else {
                 session.statusDetail = "Working..."
             }
+        } else if lastMeaningfulActivity == nil {
+            // No meaningful events found in the window — likely idle
+            session.status = .idle
+            session.needsAttention = true
+            session.statusDetail = "Waiting for input"
+            if session.needsAttentionSince == nil {
+                session.needsAttentionSince = now
+            }
         } else {
             session.status = .active
             session.needsAttention = false
@@ -269,7 +289,7 @@ final class SessionMonitor: ObservableObject {
             session.statusDetail = "Working..."
         }
 
-        session.lastActivityTime = lastLogTimestamp ?? session.lastActivityTime
+        session.lastActivityTime = lastMeaningfulActivity ?? session.lastActivityTime
         return session
     }
 

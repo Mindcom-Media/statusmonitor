@@ -6,7 +6,7 @@ final class StatusPanelWindow: NSWindow {
 
     private init() {
         super.init(
-            contentRect: NSRect(x: 0, y: 0, width: 300, height: 200),
+            contentRect: NSRect(x: 0, y: 0, width: 320, height: 400),
             styleMask: [.borderless],
             backing: .buffered,
             defer: false
@@ -17,13 +17,15 @@ final class StatusPanelWindow: NSWindow {
         self.collectionBehavior = [.canJoinAllSpaces, .stationary]
         self.isMovableByWindowBackground = true
         self.hasShadow = true
-        positionTopRight()
     }
 
     func setContent(monitor: SessionMonitor, alertManager: AlertManager) {
         let view = StatusPanelView(monitor: monitor, alertManager: alertManager)
         let hostingView = NSHostingView(rootView: view)
+        // Let the hosting view size itself to its SwiftUI content
+        hostingView.translatesAutoresizingMaskIntoConstraints = false
         self.contentView = hostingView
+        positionTopRight()
     }
 
     func positionTopRight() {

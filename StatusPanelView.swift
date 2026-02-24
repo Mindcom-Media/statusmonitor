@@ -35,26 +35,31 @@ struct StatusPanelView: View {
                     .frame(maxWidth: .infinity)
                     .padding(.vertical, 24)
             } else {
-                ScrollView {
-                    VStack(spacing: 1) {
-                        ForEach(monitor.sessions) { session in
-                            SessionRowView(session: session, isFlashing: alertManager.isFlashing)
-                                .onTapGesture {
-                                    guard !session.tty.isEmpty else { return }
-                                    SessionMonitor.focusTerminalWindow(tty: session.tty)
-                                }
-                                .cursor(.pointingHand)
+                // Show ALL sessions — no scroll constraint
+                VStack(spacing: 0) {
+                    ForEach(monitor.sessions) { session in
+                        SessionRowView(session: session, isFlashing: alertManager.isFlashing)
+                            .onTapGesture {
+                                guard !session.tty.isEmpty else { return }
+                                SessionMonitor.focusTerminalWindow(tty: session.tty)
+                            }
+                            .cursor(.pointingHand)
+
+                        if session.id != monitor.sessions.last?.id {
+                            Divider()
+                                .background(Color.white.opacity(0.08))
+                                .padding(.horizontal, 14)
                         }
                     }
-                    .padding(.vertical, 4)
                 }
-                .frame(maxHeight: 300)
+                .padding(.vertical, 4)
             }
         }
-        .frame(width: 300)
+        .frame(width: 320)
+        .fixedSize(horizontal: false, vertical: true)
         .background(
             RoundedRectangle(cornerRadius: 12)
-                .fill(alertManager.isFlashing ? Color.red.opacity(0.15) : Color.black.opacity(0.9))
+                .fill(alertManager.isFlashing ? Color.red.opacity(0.15) : Color.black.opacity(0.92))
         )
         .overlay(
             RoundedRectangle(cornerRadius: 12)
@@ -123,25 +128,29 @@ struct SessionRowView: View {
 
             VStack(alignment: .leading, spacing: 2) {
                 HStack {
-                    Text(session.displayName)
-                        .font(.system(size: 12, weight: .semibold))
+                    Text(session.projectName)
+                        .font(.system(size: 12, weight: .bold))
                         .foregroundColor(session.needsAttention && isFlashing ? .red : .white)
                         .underline(isHovered)
-                        .lineLimit(1)
                     Spacer()
                     Text(session.status.rawValue)
                         .font(.system(size: 10, weight: .bold))
                         .foregroundColor(statusColor)
+                        .padding(.horizontal, 6)
+                        .padding(.vertical, 1)
+                        .background(
+                            Capsule().fill(statusColor.opacity(0.15))
+                        )
                 }
 
-                Text(session.statusDetail.isEmpty ? session.timeSinceActivity : "\(session.statusDetail) - \(session.timeSinceActivity)")
+                Text(session.statusDetail)
                     .font(.system(size: 10))
-                    .foregroundColor(.white.opacity(0.4))
+                    .foregroundColor(.white.opacity(0.5))
                     .lineLimit(1)
             }
         }
         .padding(.horizontal, 14)
-        .padding(.vertical, 8)
+        .padding(.vertical, 10)
         .background(
             session.needsAttention
                 ? (isFlashing ? Color.red.opacity(0.2) : Color.red.opacity(0.08))
