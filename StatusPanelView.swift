@@ -4,6 +4,10 @@ struct StatusPanelView: View {
     @ObservedObject var monitor: SessionMonitor
     @ObservedObject var alertManager: AlertManager
 
+    private var anyNeedsAttention: Bool {
+        monitor.sessions.contains { $0.needsAttention }
+    }
+
     var body: some View {
         VStack(spacing: 0) {
             // Header
@@ -34,7 +38,7 @@ struct StatusPanelView: View {
                 ScrollView {
                     VStack(spacing: 1) {
                         ForEach(monitor.sessions) { session in
-                            SessionRowView(session: session)
+                            SessionRowView(session: session, isFlashing: alertManager.isFlashing)
                         }
                     }
                     .padding(.vertical, 4)
@@ -45,54 +49,74 @@ struct StatusPanelView: View {
         .frame(width: 280)
         .background(
             RoundedRectangle(cornerRadius: 12)
-                .fill(Color.black.opacity(0.9))
+                .fill(alertManager.isFlashing ? Color.red.opacity(0.15) : Color.black.opacity(0.9))
         )
         .overlay(
             RoundedRectangle(cornerRadius: 12)
                 .stroke(
-                    alertManager.isFlashing ? Color.red : Color.white.opacity(0.15),
-                    lineWidth: alertManager.isFlashing ? 2 : 1
+                    alertManager.isFlashing ? Color.red : (anyNeedsAttention ? Color.red.opacity(0.5) : Color.white.opacity(0.15)),
+                    lineWidth: alertManager.isFlashing ? 3 : (anyNeedsAttention ? 2 : 1)
                 )
-                .animation(.easeInOut(duration: 0.3).repeatCount(5, autoreverses: true), value: alertManager.isFlashing)
         )
+        .shadow(color: alertManager.isFlashing ? Color.red.opacity(0.6) : .black.opacity(0.4),
+                radius: alertManager.isFlashing ? 20 : 12)
         .clipShape(RoundedRectangle(cornerRadius: 12))
-        .shadow(color: .black.opacity(0.4), radius: 12)
     }
 }
 
 struct SessionRowView: View {
     let session: ClaudeSession
+    let isFlashing: Bool
     @State private var isPulsing = false
 
     var body: some View {
         HStack(spacing: 10) {
-            // Status dot
-            Circle()
-                .fill(statusColor)
-                .frame(width: 8, height: 8)
-                .scaleEffect(session.needsAttention && isPulsing ? 1.4 : 1.0)
-                .opacity(session.needsAttention && isPulsing ? 0.5 : 1.0)
-                .animation(
-                    session.needsAttention
-                        ? .easeInOut(duration: 0.8).repeatForever(autoreverses: true)
-                        : .default,
-                    value: isPulsing
-                )
-                .onAppear {
-                    if session.needsAttention { isPulsing = true }
+            // Status dot with pulse rings for attention
+            ZStack {
+                if session.needsAttention {
+                    // Outer pulse ring
+                    Circle()
+                        .stroke(statusColor.opacity(0.4), lineWidth: 2)
+                        .frame(width: 20, height: 20)
+                        .scaleEffect(isPulsing ? 1.8 : 1.0)
+                        .opacity(isPulsing ? 0.0 : 0.6)
+                        .animation(
+                            .easeOut(duration: 1.2).repeatForever(autoreverses: false),
+                            value: isPulsing
+                        )
+                    // Inner pulse ring
+                    Circle()
+                        .stroke(statusColor.opacity(0.6), lineWidth: 1.5)
+                        .frame(width: 14, height: 14)
+                        .scaleEffect(isPulsing ? 1.5 : 1.0)
+                        .opacity(isPulsing ? 0.0 : 0.8)
+                        .animation(
+                            .easeOut(duration: 1.2).repeatForever(autoreverses: false).delay(0.3),
+                            value: isPulsing
+                        )
                 }
-                .onChange(of: session.needsAttention) { newValue in
-                    isPulsing = newValue
-                }
+                // Core dot
+                Circle()
+                    .fill(statusColor)
+                    .frame(width: 10, height: 10)
+                    .scaleEffect(session.needsAttention && isFlashing ? 1.6 : 1.0)
+            }
+            .frame(width: 24, height: 24)
+            .onAppear {
+                if session.needsAttention { isPulsing = true }
+            }
+            .onChange(of: session.needsAttention) { newValue in
+                isPulsing = newValue
+            }
 
             VStack(alignment: .leading, spacing: 2) {
                 HStack {
                     Text(session.projectName)
                         .font(.system(size: 12, weight: .semibold))
-                        .foregroundColor(.white)
+                        .foregroundColor(session.needsAttention && isFlashing ? .red : .white)
                     Spacer()
                     Text(session.status.rawValue)
-                        .font(.system(size: 10, weight: .medium))
+                        .font(.system(size: 10, weight: .bold))
                         .foregroundColor(statusColor)
                 }
 
@@ -106,16 +130,16 @@ struct SessionRowView: View {
         .padding(.vertical, 8)
         .background(
             session.needsAttention
-                ? Color.red.opacity(0.08)
+                ? (isFlashing ? Color.red.opacity(0.2) : Color.red.opacity(0.08))
                 : Color.clear
         )
     }
 
     private var statusColor: Color {
         switch session.status {
-        case .active: return Color(red: 0.2, green: 0.78, blue: 0.35)  // green
-        case .waiting: return Color(red: 1.0, green: 0.23, blue: 0.19) // red
-        case .idle: return Color(red: 1.0, green: 0.84, blue: 0.04)    // yellow
+        case .active: return Color(red: 0.2, green: 0.78, blue: 0.35)
+        case .waiting: return Color(red: 1.0, green: 0.23, blue: 0.19)
+        case .idle: return Color(red: 1.0, green: 0.84, blue: 0.04)
         case .unknown: return Color.gray
         }
     }
