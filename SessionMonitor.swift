@@ -104,22 +104,83 @@ final class SessionMonitor: ObservableObject {
         let fm = FileManager.default
         guard let files = try? fm.contentsOfDirectory(atPath: debugDir) else { return }
 
-        for file in files where file.hasSuffix(".txt") {
+        // Sort by modification time (most recent first) to find active logs faster
+        let sortedFiles = files.filter { $0.hasSuffix(".txt") }.sorted { a, b in
+            let pathA = "\(debugDir)/\(a)"
+            let pathB = "\(debugDir)/\(b)"
+            let modA = (try? fm.attributesOfItem(atPath: pathA)[.modificationDate] as? Date) ?? .distantPast
+            let modB = (try? fm.attributesOfItem(atPath: pathB)[.modificationDate] as? Date) ?? .distantPast
+            return modA > modB
+        }
+
+        // Only check recently modified logs (last 24 hours)
+        let cutoff = Date().addingTimeInterval(-86400)
+
+        for file in sortedFiles {
             let uuid = String(file.dropLast(4))
             // Skip if already mapped to a PID
             if pidToUUID.values.contains(uuid) { continue }
 
             let path = "\(debugDir)/\(file)"
-            // Only read first 2KB to find the PID lock line
+
+            // Skip old files
+            if let attrs = try? fm.attributesOfItem(atPath: path),
+               let modDate = attrs[.modificationDate] as? Date,
+               modDate < cutoff { break } // Sorted by time, so all remaining are older
+
             guard let handle = FileHandle(forReadingAtPath: path) else { continue }
             defer { handle.closeFile() }
-            let headerData = handle.readData(ofLength: 2048)
-            guard let header = String(data: headerData, encoding: .utf8) else { continue }
 
-            for pid in unmapped {
-                if header.contains("Acquired PID lock") && header.contains("PID \(pid)") {
-                    pidToUUID[pid] = uuid
+            // Strategy 1: Check header for "Acquired PID lock ... (PID XXXXX)"
+            let headerData = handle.readData(ofLength: 3072)
+            if let header = String(data: headerData, encoding: .utf8) {
+                for pid in unmapped where pidToUUID[pid] == nil {
+                    if header.contains("Acquired PID lock") && header.contains("PID \(pid)") {
+                        pidToUUID[pid] = uuid
+                    }
                 }
+            }
+
+            // Strategy 2: Check tail for "claude.json.tmp.{PID}" pattern
+            // Read last 32KB to catch patterns even if recent tail is update logs
+            let stillUnmapped = unmapped.filter { pidToUUID[$0] == nil }
+            guard !stillUnmapped.isEmpty else { return }
+
+            handle.seekToEndOfFile()
+            let fileSize = handle.offsetInFile
+            let tailSize: UInt64 = min(fileSize, 32768)
+            handle.seek(toFileOffset: fileSize - tailSize)
+            let tailData = handle.readDataToEndOfFile()
+
+            if let tail = String(data: tailData, encoding: .utf8) {
+                for pid in stillUnmapped {
+                    if tail.contains("claude.json.tmp.\(pid)") {
+                        pidToUUID[pid] = uuid
+                    }
+                }
+            }
+        }
+
+        // Strategy 3: For any still-unmapped PIDs, use grep to search
+        // all debug logs for the PID pattern (runs once per PID, result is cached)
+        let finalUnmapped = unmapped.filter { pidToUUID[$0] == nil }
+        for pid in finalUnmapped {
+            // Search for both patterns
+            // Use grep -rl to recursively search the debug directory
+            let grepOutput = runCommand("/usr/bin/grep", arguments: [
+                "-rl", "-E", "(claude\\.json\\.tmp\\.\(pid)|PID \(pid))", debugDir
+            ])
+            // Pick the most recently modified matching file
+            let matchingFiles = grepOutput.components(separatedBy: "\n")
+                .filter { !$0.isEmpty && $0.hasSuffix(".txt") }
+                .sorted { a, b in
+                    let modA = (try? fm.attributesOfItem(atPath: a)[.modificationDate] as? Date) ?? .distantPast
+                    let modB = (try? fm.attributesOfItem(atPath: b)[.modificationDate] as? Date) ?? .distantPast
+                    return modA > modB
+                }
+            if let bestMatch = matchingFiles.first {
+                let uuid = String(URL(fileURLWithPath: bestMatch).deletingPathExtension().lastPathComponent)
+                pidToUUID[pid] = uuid
             }
         }
     }
