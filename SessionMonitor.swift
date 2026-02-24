@@ -73,11 +73,11 @@ final class SessionMonitor: ObservableObject {
 
         for line in psOutput.components(separatedBy: "\n") {
             let trimmed = line.trimmingCharacters(in: .whitespaces)
-            // Match lines like "47050 claude" (exact command name)
             let parts = trimmed.split(separator: " ", maxSplits: 1)
             guard parts.count == 2,
-                  let pid = Int(parts[0]),
-                  parts[1] == "claude" else { continue }
+                  let pid = Int(parts[0]) else { continue }
+            let cmd = parts[1].trimmingCharacters(in: .whitespaces)
+            guard cmd == "claude" else { continue }
             claudePIDs.append(pid)
         }
 
@@ -118,15 +118,13 @@ final class SessionMonitor: ObservableObject {
 
         for file in sortedFiles {
             let uuid = String(file.dropLast(4))
-            // Skip if already mapped to a PID
             if pidToUUID.values.contains(uuid) { continue }
 
             let path = "\(debugDir)/\(file)"
 
-            // Skip old files
             if let attrs = try? fm.attributesOfItem(atPath: path),
                let modDate = attrs[.modificationDate] as? Date,
-               modDate < cutoff { break } // Sorted by time, so all remaining are older
+               modDate < cutoff { break }
 
             guard let handle = FileHandle(forReadingAtPath: path) else { continue }
             defer { handle.closeFile() }
@@ -142,7 +140,6 @@ final class SessionMonitor: ObservableObject {
             }
 
             // Strategy 2: Check tail for "claude.json.tmp.{PID}" pattern
-            // Read last 32KB to catch patterns even if recent tail is update logs
             let stillUnmapped = unmapped.filter { pidToUUID[$0] == nil }
             guard !stillUnmapped.isEmpty else { return }
 
@@ -161,21 +158,18 @@ final class SessionMonitor: ObservableObject {
             }
         }
 
-        // Strategy 3: For any still-unmapped PIDs, use grep to search
-        // all debug logs for the PID pattern (runs once per PID, result is cached)
+        // Strategy 3: Grep fallback for any still-unmapped PIDs
         let finalUnmapped = unmapped.filter { pidToUUID[$0] == nil }
+        let fm2 = FileManager.default
         for pid in finalUnmapped {
-            // Search for both patterns
-            // Use grep -rl to recursively search the debug directory
             let grepOutput = runCommand("/usr/bin/grep", arguments: [
                 "-rl", "-E", "(claude\\.json\\.tmp\\.\(pid)|PID \(pid))", debugDir
             ])
-            // Pick the most recently modified matching file
             let matchingFiles = grepOutput.components(separatedBy: "\n")
                 .filter { !$0.isEmpty && $0.hasSuffix(".txt") }
                 .sorted { a, b in
-                    let modA = (try? fm.attributesOfItem(atPath: a)[.modificationDate] as? Date) ?? .distantPast
-                    let modB = (try? fm.attributesOfItem(atPath: b)[.modificationDate] as? Date) ?? .distantPast
+                    let modA = (try? fm2.attributesOfItem(atPath: a)[.modificationDate] as? Date) ?? .distantPast
+                    let modB = (try? fm2.attributesOfItem(atPath: b)[.modificationDate] as? Date) ?? .distantPast
                     return modA > modB
                 }
             if let bestMatch = matchingFiles.first {
@@ -197,18 +191,14 @@ final class SessionMonitor: ObservableObject {
         }
         defer { handle.closeFile() }
 
-        // Get file size
         handle.seekToEndOfFile()
         let fileSize = handle.offsetInFile
 
-        // Determine read position - read last 8KB or from last position
         let lastPos = lastReadPositions[uuid] ?? 0
         let readFrom: UInt64
         if lastPos > fileSize {
-            // File was rotated
             readFrom = fileSize > 8192 ? fileSize - 8192 : 0
         } else if fileSize - lastPos > 8192 {
-            // Too much new data, just read last 8KB
             readFrom = fileSize - 8192
         } else {
             readFrom = lastPos
@@ -225,7 +215,6 @@ final class SessionMonitor: ObservableObject {
 
         let lines = text.components(separatedBy: "\n")
 
-        // Find timestamps and key events in the tail
         var lastPermissionPrompt: Date?
         var lastStreamStarted: Date?
         var lastToolHook: Date?
@@ -247,13 +236,11 @@ final class SessionMonitor: ObservableObject {
             }
         }
 
-        // Determine status based on most recent events
         let now = Date()
         let mostRecentWork = [lastStreamStarted, lastToolHook, lastSpawningShell].compactMap { $0 }.max()
 
         if let permTime = lastPermissionPrompt,
            (mostRecentWork == nil || permTime > mostRecentWork!) {
-            // Permission prompt is the most recent significant event
             session.status = .waiting
             session.needsAttention = true
             session.statusDetail = "Needs permission"
@@ -261,7 +248,6 @@ final class SessionMonitor: ObservableObject {
                 session.needsAttentionSince = permTime
             }
         } else if let lastLog = lastLogTimestamp, now.timeIntervalSince(lastLog) > 60 {
-            // No activity for 60+ seconds
             session.status = .idle
             session.needsAttention = true
             session.statusDetail = "No activity \(formatDuration(now.timeIntervalSince(lastLog)))"
@@ -270,7 +256,6 @@ final class SessionMonitor: ObservableObject {
             }
         } else if let workTime = mostRecentWork, let lastLog = lastLogTimestamp,
                   now.timeIntervalSince(lastLog) < 30 {
-            // Recent work activity
             session.status = .active
             session.needsAttention = false
             session.needsAttentionSince = nil
@@ -295,7 +280,6 @@ final class SessionMonitor: ObservableObject {
     // MARK: - Helpers
 
     private func parseTimestamp(_ line: String) -> Date? {
-        // Format: 2026-02-24T09:57:08.673Z
         guard line.count > 24, line[line.index(line.startIndex, offsetBy: 4)] == "-" else { return nil }
         let tsString = String(line.prefix(24))
         let formatter = ISO8601DateFormatter()
@@ -322,8 +306,9 @@ final class SessionMonitor: ObservableObject {
 
         do {
             try process.run()
-            process.waitUntilExit()
+            // Read data BEFORE waitUntilExit to avoid pipe buffer deadlock
             let data = pipe.fileHandleForReading.readDataToEndOfFile()
+            process.waitUntilExit()
             return String(data: data, encoding: .utf8) ?? ""
         } catch {
             return ""
