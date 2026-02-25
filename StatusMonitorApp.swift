@@ -52,7 +52,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             self.autoHideTimer?.invalidate()
             self.panelManuallyToggled = false
             StatusPanelWindow.shared.show()
-            StatusPanelWindow.shared.positionTopRight()
         }
 
         // Observe session changes for menu bar color and auto-hide
@@ -124,9 +123,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             panelManuallyToggled = true
             autoHideTimer?.invalidate()
             StatusPanelWindow.shared.toggle()
-            if StatusPanelWindow.shared.isVisible {
-                StatusPanelWindow.shared.positionTopRight()
-            }
         }
     }
 
