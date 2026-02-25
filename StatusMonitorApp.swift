@@ -1,5 +1,6 @@
 import SwiftUI
 import AppKit
+import Combine
 
 @main
 struct StatusMonitorApp: App {
@@ -16,64 +17,112 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var statusItem: NSStatusItem!
     private let monitor = SessionMonitor()
     private let alertManager = AlertManager()
-    private var attentionObserver: Any?
+    private var sessionObserver: AnyCancellable?
+    private var autoHideTimer: Timer?
+    private var panelManuallyToggled = false
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         // Hide from dock
         NSApplication.shared.setActivationPolicy(.accessory)
 
         // Setup menu bar icon
-        statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.squareLength)
+        statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
+        updateMenuBarIcon(sessions: [])
+
+        // Click action on the status item button
         if let button = statusItem.button {
-            button.image = NSImage(systemSymbolName: "antenna.radiowaves.left.and.right",
-                                   accessibilityDescription: "StatusMonitor")
+            button.action = #selector(statusItemClicked)
+            button.target = self
+            button.sendAction(on: [.leftMouseUp, .rightMouseUp])
         }
 
-        let menu = NSMenu()
-        menu.addItem(NSMenuItem(title: "Toggle Panel", action: #selector(togglePanel), keyEquivalent: "t"))
-        menu.addItem(NSMenuItem.separator())
-        menu.addItem(NSMenuItem(title: "Quit", action: #selector(quitApp), keyEquivalent: "q"))
-        statusItem.menu = menu
-
-        // Setup floating panel
+        // Setup floating panel (starts hidden)
         let panel = StatusPanelWindow.shared
         panel.setContent(monitor: monitor, alertManager: alertManager)
-        panel.show()
 
-        // Wire up alert trigger
+        // Wire up alert trigger — show panel when attention needed
         monitor.onAttentionNeeded = { [weak self] in
-            self?.alertManager.triggerAlert()
-            self?.updateMenuBarIcon(needsAttention: true)
+            guard let self else { return }
+            self.alertManager.triggerAlert()
+            self.autoHideTimer?.invalidate()
+            self.panelManuallyToggled = false
+            StatusPanelWindow.shared.show()
+            StatusPanelWindow.shared.positionTopRight()
         }
 
-        // Observe session changes to update menu bar icon
-        attentionObserver = monitor.$sessions
+        // Observe session changes for menu bar color and auto-hide
+        sessionObserver = monitor.$sessions
             .receive(on: RunLoop.main)
             .sink { [weak self] sessions in
+                guard let self else { return }
+                self.updateMenuBarIcon(sessions: sessions)
+
                 let anyNeedsAttention = sessions.contains { $0.needsAttention }
-                self?.updateMenuBarIcon(needsAttention: anyNeedsAttention)
+
+                if !anyNeedsAttention && StatusPanelWindow.shared.isVisible && !self.panelManuallyToggled {
+                    // All clear — auto-hide after 3 seconds
+                    self.autoHideTimer?.invalidate()
+                    self.autoHideTimer = Timer.scheduledTimer(withTimeInterval: 3.0, repeats: false) { _ in
+                        StatusPanelWindow.shared.orderOut(nil)
+                    }
+                } else if anyNeedsAttention {
+                    // Cancel any pending auto-hide
+                    self.autoHideTimer?.invalidate()
+                }
             }
 
         // Start monitoring
         monitor.startMonitoring()
     }
 
-    private func updateMenuBarIcon(needsAttention: Bool) {
+    private func updateMenuBarIcon(sessions: [ClaudeSession]) {
         guard let button = statusItem.button else { return }
-        let symbolName = needsAttention
-            ? "antenna.radiowaves.left.and.right.slash"
-            : "antenna.radiowaves.left.and.right"
-        button.image = NSImage(systemSymbolName: symbolName,
-                               accessibilityDescription: "StatusMonitor")
-        if needsAttention {
-            button.contentTintColor = .systemRed
+
+        let color: NSColor
+        let anyWaiting = sessions.contains { $0.status == .waiting }
+        let anyIdle = sessions.contains { $0.status == .idle }
+
+        if sessions.isEmpty {
+            color = .systemGray
+        } else if anyWaiting {
+            color = .systemRed
+        } else if anyIdle {
+            color = .systemYellow
         } else {
-            button.contentTintColor = nil
+            color = .systemGreen
+        }
+
+        let image = NSImage(systemSymbolName: "circle.fill", accessibilityDescription: "StatusMonitor")
+        button.image = image
+        button.contentTintColor = color
+
+        // Show session count next to icon
+        if sessions.isEmpty {
+            button.title = ""
+        } else {
+            button.title = " \(sessions.count)"
         }
     }
 
-    @objc private func togglePanel() {
-        StatusPanelWindow.shared.toggle()
+    @objc private func statusItemClicked() {
+        let event = NSApp.currentEvent
+        if event?.type == .rightMouseUp {
+            // Right-click shows menu
+            let menu = NSMenu()
+            menu.addItem(NSMenuItem(title: "Quit StatusMonitor", action: #selector(quitApp), keyEquivalent: "q"))
+            statusItem.menu = menu
+            statusItem.button?.performClick(nil)
+            // Clear menu so left-click works next time
+            DispatchQueue.main.async { self.statusItem.menu = nil }
+        } else {
+            // Left-click toggles panel
+            panelManuallyToggled = true
+            autoHideTimer?.invalidate()
+            StatusPanelWindow.shared.toggle()
+            if StatusPanelWindow.shared.isVisible {
+                StatusPanelWindow.shared.positionTopRight()
+            }
+        }
     }
 
     @objc private func quitApp() {
