@@ -5,7 +5,6 @@ final class SessionMonitor: ObservableObject {
     @Published var sessions: [ClaudeSession] = []
 
     private var timer: Timer?
-    private var lastReadPositions: [String: UInt64] = [:]
     private var pidToUUID: [Int: String] = [:]
     private var previousAttentionState: [String: Bool] = [:]
     enum AttentionType {
@@ -202,19 +201,14 @@ final class SessionMonitor: ObservableObject {
         handle.seekToEndOfFile()
         let fileSize = handle.offsetInFile
 
-        let lastPos = lastReadPositions[uuid] ?? 0
-        let readFrom: UInt64
-        if lastPos > fileSize {
-            readFrom = fileSize > 8192 ? fileSize - 8192 : 0
-        } else if fileSize - lastPos > 8192 {
-            readFrom = fileSize - 8192
-        } else {
-            readFrom = lastPos
-        }
+        // Always read the last 16KB so we catch permission_prompt lines
+        // even when no new data has been written (user hasn't responded yet).
+        // The old incremental approach would read 0 bytes in that case and
+        // misclassify a waiting session as idle.
+        let readFrom: UInt64 = fileSize > 16384 ? fileSize - 16384 : 0
 
         handle.seek(toFileOffset: readFrom)
         let data = handle.readDataToEndOfFile()
-        lastReadPositions[uuid] = fileSize
 
         guard let text = String(data: data, encoding: .utf8) else {
             session.status = .unknown
@@ -234,6 +228,8 @@ final class SessionMonitor: ObservableObject {
 
             if line.contains("Notification with query: permission_prompt") {
                 lastPermissionPrompt = ts
+                lastMeaningfulActivity = ts
+            } else if line.contains("PostToolUse") {
                 lastMeaningfulActivity = ts
             } else if line.contains("Stream started") {
                 lastStreamStarted = ts
