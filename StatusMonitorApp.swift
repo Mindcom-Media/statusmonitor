@@ -41,9 +41,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         panel.setContent(monitor: monitor, alertManager: alertManager)
 
         // Wire up alert trigger — show panel when attention needed
-        monitor.onAttentionNeeded = { [weak self] in
+        monitor.onAttentionNeeded = { [weak self] type in
             guard let self else { return }
-            self.alertManager.triggerAlert()
+            switch type {
+            case .permission:
+                self.alertManager.triggerPermissionAlert()
+            case .done:
+                self.alertManager.triggerDoneAlert()
+            }
             self.autoHideTimer?.invalidate()
             self.panelManuallyToggled = false
             StatusPanelWindow.shared.show()

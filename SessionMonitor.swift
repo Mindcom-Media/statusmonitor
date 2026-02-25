@@ -8,7 +8,11 @@ final class SessionMonitor: ObservableObject {
     private var lastReadPositions: [String: UInt64] = [:]
     private var pidToUUID: [Int: String] = [:]
     private var previousAttentionState: [String: Bool] = [:]
-    var onAttentionNeeded: (() -> Void)?
+    enum AttentionType {
+        case permission  // Needs user to confirm/approve something
+        case done        // Finished working, waiting for next input
+    }
+    var onAttentionNeeded: ((AttentionType) -> Void)?
 
     private let debugDir: String = {
         let home = FileManager.default.homeDirectoryForCurrentUser.path
@@ -45,11 +49,16 @@ final class SessionMonitor: ObservableObject {
             }
 
             // Check for new attention transitions
-            var anyNewAttention = false
+            var newPermission = false
+            var newDone = false
             for session in updated {
                 let wasAttention = self.previousAttentionState[session.id] ?? false
                 if session.needsAttention && !wasAttention {
-                    anyNewAttention = true
+                    if session.status == .waiting {
+                        newPermission = true
+                    } else {
+                        newDone = true
+                    }
                 }
                 self.previousAttentionState[session.id] = session.needsAttention
             }
@@ -60,8 +69,11 @@ final class SessionMonitor: ObservableObject {
 
             DispatchQueue.main.async {
                 self.sessions = updated
-                if anyNewAttention {
-                    self.onAttentionNeeded?()
+                // Permission alerts take priority over done alerts
+                if newPermission {
+                    self.onAttentionNeeded?(.permission)
+                } else if newDone {
+                    self.onAttentionNeeded?(.done)
                 }
             }
         }
