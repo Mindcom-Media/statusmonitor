@@ -84,14 +84,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
         let color: NSColor
         let anyWaiting = sessions.contains { $0.status == .waiting }
-        let anyIdle = sessions.contains { $0.status == .idle }
+        let anyNeedsAttention = sessions.contains { $0.needsAttention }
 
         if sessions.isEmpty {
             color = .systemGray
         } else if anyWaiting {
             color = .systemRed
-        } else if anyIdle {
-            color = .systemYellow
+        } else if anyNeedsAttention {
+            color = .systemOrange
         } else {
             color = .systemGreen
         }

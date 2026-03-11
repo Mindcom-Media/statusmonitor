@@ -34,16 +34,18 @@ final class SessionMonitor: ObservableObject {
         DispatchQueue.global(qos: .utility).async { [weak self] in
             guard let self else { return }
             let discovered = self.discoverProcesses()
-            self.mapPIDsToDebugLogs(pids: discovered.map(\.pid))
-            let windowNames = self.getTerminalWindowNames()
+            let cwds = Dictionary(discovered.map { ($0.pid, $0.cwd) }, uniquingKeysWith: { first, _ in first })
+            self.mapPIDsToDebugLogs(pids: discovered.map(\.pid), cwds: cwds)
+            let terminalInfo = self.getTerminalInfo()
             var updated: [ClaudeSession] = []
 
             for proc in discovered {
                 guard let uuid = self.pidToUUID[proc.pid] else { continue }
                 var session = self.sessions.first(where: { $0.id == uuid })
                     ?? ClaudeSession(id: uuid, pid: proc.pid, projectPath: proc.cwd, tty: proc.tty)
-                session.windowName = windowNames[proc.tty] ?? ""
-                session = self.updateSessionState(session: session, uuid: uuid)
+                let info = terminalInfo[proc.tty]
+                session.windowName = info?.windowName ?? ""
+                session = self.updateFromTerminal(session: session, screenContent: info?.screenContent ?? "")
                 updated.append(session)
             }
 
@@ -90,7 +92,7 @@ final class SessionMonitor: ObservableObject {
             guard parts.count == 3,
                   let pid = Int(parts[0]) else { continue }
             let cmd = parts[2].trimmingCharacters(in: .whitespaces)
-            guard cmd == "claude" else { continue }
+            guard cmd == "claude" || cmd.hasPrefix("claude ") else { continue }
             claudeProcs.append((pid: pid, tty: parts[1]))
         }
 
@@ -108,8 +110,13 @@ final class SessionMonitor: ObservableObject {
         return results
     }
 
-    /// Get Terminal window names mapped by TTY via AppleScript
-    private func getTerminalWindowNames() -> [String: String] {
+    struct TerminalInfo {
+        var windowName: String = ""
+        var screenContent: String = ""
+    }
+
+    /// Get Terminal window names and screen content mapped by TTY via AppleScript
+    private func getTerminalInfo() -> [String: TerminalInfo] {
         let script = """
         tell application "Terminal"
             set output to ""
@@ -118,26 +125,44 @@ final class SessionMonitor: ObservableObject {
                 try
                     set w to window i
                     set wName to name of w
-                    repeat with t in tabs of w
-                        set ttyName to tty of t
-                        set output to output & ttyName & "|||" & wName & linefeed
-                    end repeat
+                    set selTab to selected tab of w
+                    set ttyName to tty of selTab
+                    set c to history of selTab
+                    set cLen to length of c
+                    if cLen > 500 then
+                        set snippet to text (cLen - 499) thru cLen of c
+                    else
+                        set snippet to c
+                    end if
+                    set output to output & ttyName & "|||" & wName & "|||" & snippet & "###ENDTAB###" & linefeed
                 end try
             end repeat
             return output
         end tell
         """
         let result = runCommand("/usr/bin/osascript", arguments: ["-e", script])
-        var mapping: [String: String] = [:]
-        for line in result.components(separatedBy: "\n") {
-            let parts = line.components(separatedBy: "|||")
-            guard parts.count == 2 else { continue }
-            // TTY from AppleScript: "/dev/ttys007", from ps: "ttys007"
+        var mapping: [String: TerminalInfo] = [:]
+        for entry in result.components(separatedBy: "###ENDTAB###") {
+            let trimmed = entry.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !trimmed.isEmpty else { continue }
+            let parts = trimmed.components(separatedBy: "|||")
+            guard parts.count >= 2 else { continue }
             let tty = parts[0].trimmingCharacters(in: .whitespaces)
                 .replacingOccurrences(of: "/dev/", with: "")
-            mapping[tty] = parts[1].trimmingCharacters(in: .whitespaces)
+            var info = TerminalInfo()
+            info.windowName = parts[1].trimmingCharacters(in: .whitespaces)
+            if parts.count >= 3 {
+                info.screenContent = parts[2...].joined(separator: "|||")
+            }
+            mapping[tty] = info
         }
         return mapping
+    }
+
+    /// Legacy wrapper for backward compatibility
+    private func getTerminalWindowNames() -> [String: String] {
+        let info = getTerminalInfo()
+        return info.mapValues { $0.windowName }
     }
 
     /// Focus a Terminal window by its TTY
@@ -159,15 +184,13 @@ final class SessionMonitor: ObservableObject {
 
     // MARK: - Debug Log Mapping
 
-    private func mapPIDsToDebugLogs(pids: [Int]) {
+    private func mapPIDsToDebugLogs(pids: [Int], cwds: [Int: String]) {
         let unmapped = pids.filter { pidToUUID[$0] == nil }
         guard !unmapped.isEmpty else { return }
 
         let fm = FileManager.default
 
-        // Use grep to find all debug logs referencing each PID, then pick the
-        // most recently modified match. This handles PID reuse correctly —
-        // the current session's log will always be the most recently modified.
+        // Strategy 1: grep debug logs for PID references
         for pid in unmapped {
             let grepOutput = runCommand("/usr/bin/grep", arguments: [
                 "-rl", "-E", "(claude\\.json\\.tmp\\.\(pid)|Acquired PID lock.*PID \(pid))", debugDir
@@ -184,120 +207,131 @@ final class SessionMonitor: ObservableObject {
                 pidToUUID[pid] = uuid
             }
         }
+
+        // Strategy 2: for still-unmapped PIDs, find the most recently modified
+        // JSONL conversation file in the project directory matching their CWD.
+        // Path format: ~/.claude/projects/-Users-foo-repos-bar/<uuid>.jsonl
+        let home = fm.homeDirectoryForCurrentUser.path
+        let projectsDir = "\(home)/.claude/projects"
+        let stillUnmapped = pids.filter { pidToUUID[$0] == nil }
+        for pid in stillUnmapped {
+            guard let cwd = cwds[pid] else { continue }
+            let projectKey = cwd.replacingOccurrences(of: "/", with: "-")
+            let projectDir = "\(projectsDir)/\(projectKey)"
+            guard let contents = try? fm.contentsOfDirectory(atPath: projectDir) else { continue }
+            let jsonlFiles = contents.filter { $0.hasSuffix(".jsonl") }
+                .map { "\(projectDir)/\($0)" }
+                .sorted { a, b in
+                    let modA = (try? fm.attributesOfItem(atPath: a)[.modificationDate] as? Date) ?? .distantPast
+                    let modB = (try? fm.attributesOfItem(atPath: b)[.modificationDate] as? Date) ?? .distantPast
+                    return modA > modB
+                }
+            if let bestMatch = jsonlFiles.first {
+                let uuid = String(URL(fileURLWithPath: bestMatch).deletingPathExtension().lastPathComponent)
+                pidToUUID[pid] = uuid
+            }
+        }
+
+        // Strategy 3: for any remaining unmapped PIDs, use a synthetic UUID
+        // so the session still appears in the UI
+        for pid in pids where pidToUUID[pid] == nil {
+            pidToUUID[pid] = "pid-\(pid)"
+        }
     }
 
-    // MARK: - State Detection
+    // MARK: - State Detection (Terminal Screen Content)
 
-    private func updateSessionState(session: ClaudeSession, uuid: String) -> ClaudeSession {
+    /// Detect session state by reading the actual terminal screen content.
+    /// This is more reliable than debug logs or JSONL timestamps.
+    private func updateFromTerminal(session: ClaudeSession, screenContent: String) -> ClaudeSession {
         var session = session
-        let path = "\(debugDir)/\(uuid).txt"
+        let content = screenContent
 
-        guard let handle = FileHandle(forReadingAtPath: path) else {
+        if content.isEmpty {
             session.status = .unknown
-            return session
-        }
-        defer { handle.closeFile() }
-
-        handle.seekToEndOfFile()
-        let fileSize = handle.offsetInFile
-
-        // Always read the last 16KB so we catch permission_prompt lines
-        // even when no new data has been written (user hasn't responded yet).
-        // The old incremental approach would read 0 bytes in that case and
-        // misclassify a waiting session as idle.
-        let readFrom: UInt64 = fileSize > 16384 ? fileSize - 16384 : 0
-
-        handle.seek(toFileOffset: readFrom)
-        let data = handle.readDataToEndOfFile()
-
-        guard let text = String(data: data, encoding: .utf8) else {
-            session.status = .unknown
+            session.needsAttention = false
+            session.statusDetail = "No terminal data"
             return session
         }
 
-        let lines = text.components(separatedBy: "\n")
-
-        var lastPermissionPrompt: Date?
-        var lastStreamStarted: Date?
-        var lastToolHook: Date?
-        var lastSpawningShell: Date?
-        var lastMeaningfulActivity: Date?
-
-        for line in lines {
-            guard let ts = parseTimestamp(line) else { continue }
-
-            if line.contains("Notification with query: permission_prompt") {
-                lastPermissionPrompt = ts
-                lastMeaningfulActivity = ts
-            } else if line.contains("PostToolUse") {
-                lastMeaningfulActivity = ts
-            } else if line.contains("Stream started") {
-                lastStreamStarted = ts
-                lastMeaningfulActivity = ts
-            } else if line.contains("executePreToolHooks called") {
-                lastToolHook = ts
-                lastMeaningfulActivity = ts
-            } else if line.contains("Spawning shell") {
-                lastSpawningShell = ts
-                lastMeaningfulActivity = ts
-            } else if line.contains("UserPromptSubmit") {
-                lastMeaningfulActivity = ts
-            } else if line.contains("[API:request]") || line.contains("attribution header") {
-                lastMeaningfulActivity = ts
-            }
-            // Ignore noise: "Fast mode unavailable", "High write ratio",
-            // version checks, symlink updates — these don't indicate real work
+        // Check for permission prompt — Claude is asking user to approve something
+        // Patterns: "Allow", "Yes / No", "approve", permission-related UI
+        let permissionPatterns = [
+            "Allow Claude",
+            "allow this action",
+            "Yes / No",
+            "[Y]es",
+            "(Y)es",
+            "yes/no",
+            "Do you want to",
+            "permission",
+            "approve this"
+        ]
+        let hasPermissionPrompt = permissionPatterns.contains { pattern in
+            content.range(of: pattern, options: .caseInsensitive) != nil
         }
 
-        let now = Date()
-        let mostRecentWork = [lastStreamStarted, lastToolHook, lastSpawningShell].compactMap { $0 }.max()
+        // Check for active work — Claude is currently processing
+        // Look for spinner/progress indicators or "Working", "Running", etc.
+        let activePatterns = [
+            "Meandering",
+            "Brewing",
+            "Crunching",
+            "Thinking",
+            "Working",
+            "Running",
+            "Compacting",
+            "Planning",
+            "Reasoning",
+            "Analyzing",
+            "Searching",
+            "Generating",
+            "Formatting",
+            "Indexing"
+        ]
+        // Active indicators appear near the end of the content, typically as status text
+        // Only check the last 200 chars for active status
+        let tail = String(content.suffix(200))
+        let isActive = activePatterns.contains { pattern in
+            tail.range(of: pattern, options: .caseInsensitive) != nil
+        }
 
-        if let permTime = lastPermissionPrompt,
-           (mostRecentWork == nil || permTime > mostRecentWork!) {
-            // Permission prompt is the most recent significant event
+        // Check for idle prompt — the ❯ prompt means Claude finished and awaits input
+        let isAtPrompt = tail.contains("❯") && !isActive
+
+        if hasPermissionPrompt {
             session.status = .waiting
             session.needsAttention = true
             session.statusDetail = "Needs permission"
             if session.needsAttentionSince == nil {
-                session.needsAttentionSince = permTime
+                session.needsAttentionSince = Date()
             }
-        } else if let lastWork = lastMeaningfulActivity, now.timeIntervalSince(lastWork) > 30 {
-            // No meaningful activity for 30+ seconds — Claude is done
-            session.status = .idle
-            session.needsAttention = true
-            session.statusDetail = "Waiting for input \(formatDuration(now.timeIntervalSince(lastWork)))"
-            if session.needsAttentionSince == nil {
-                session.needsAttentionSince = lastWork
-            }
-        } else if let workTime = mostRecentWork, let lastWork = lastMeaningfulActivity,
-                  now.timeIntervalSince(lastWork) < 30 {
-            // Recent meaningful work
+        } else if isActive {
             session.status = .active
             session.needsAttention = false
             session.needsAttentionSince = nil
-            if lastSpawningShell != nil && lastSpawningShell == workTime {
-                session.statusDetail = "Running command..."
-            } else if lastToolHook != nil && lastToolHook == workTime {
-                session.statusDetail = "Using tools..."
+            // Try to extract what Claude is doing
+            if let match = activePatterns.first(where: { tail.range(of: $0, options: .caseInsensitive) != nil }) {
+                session.statusDetail = "\(match)..."
             } else {
                 session.statusDetail = "Working..."
             }
-        } else if lastMeaningfulActivity == nil {
-            // No meaningful events found in the window — likely idle
+            session.lastActivityTime = Date()
+        } else if isAtPrompt {
             session.status = .idle
             session.needsAttention = true
             session.statusDetail = "Waiting for input"
             if session.needsAttentionSince == nil {
-                session.needsAttentionSince = now
+                session.needsAttentionSince = Date()
             }
         } else {
             session.status = .active
             session.needsAttention = false
             session.needsAttentionSince = nil
             session.statusDetail = "Working..."
+            session.lastActivityTime = Date()
         }
 
-        session.lastActivityTime = lastMeaningfulActivity ?? session.lastActivityTime
         return session
     }
 
