@@ -6,7 +6,7 @@ final class StatusPanelWindow: NSWindow {
 
     private init() {
         super.init(
-            contentRect: NSRect(x: 0, y: 0, width: 320, height: 400),
+            contentRect: NSRect(x: 0, y: 0, width: 200, height: 400),
             styleMask: [.borderless],
             backing: .buffered,
             defer: false

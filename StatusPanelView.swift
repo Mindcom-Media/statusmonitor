@@ -23,8 +23,8 @@ struct StatusPanelView: View {
                     .padding(.vertical, 2)
                     .background(Capsule().fill(Color.white.opacity(0.15)))
             }
-            .padding(.horizontal, 14)
-            .padding(.vertical, 10)
+            .padding(.horizontal, 10)
+            .padding(.vertical, 6)
 
             Divider().background(Color.white.opacity(0.15))
 
@@ -48,14 +48,14 @@ struct StatusPanelView: View {
                         if session.id != monitor.sessions.last?.id {
                             Divider()
                                 .background(Color.white.opacity(0.08))
-                                .padding(.horizontal, 14)
+                                .padding(.horizontal, 10)
                         }
                     }
                 }
-                .padding(.vertical, 4)
+                .padding(.vertical, 2)
             }
         }
-        .frame(width: 320)
+        .frame(width: 200)
         .fixedSize(horizontal: false, vertical: true)
         .background(
             RoundedRectangle(cornerRadius: 12)
@@ -90,13 +90,13 @@ struct SessionRowView: View {
     @State private var isHovered = false
 
     var body: some View {
-        HStack(spacing: 10) {
+        HStack(spacing: 6) {
             // Status dot with pulse rings
             ZStack {
                 if session.needsAttention {
                     Circle()
-                        .stroke(statusColor.opacity(0.4), lineWidth: 2)
-                        .frame(width: 20, height: 20)
+                        .stroke(statusColor.opacity(0.4), lineWidth: 1.5)
+                        .frame(width: 16, height: 16)
                         .scaleEffect(isPulsing ? 1.8 : 1.0)
                         .opacity(isPulsing ? 0.0 : 0.6)
                         .animation(
@@ -104,8 +104,8 @@ struct SessionRowView: View {
                             value: isPulsing
                         )
                     Circle()
-                        .stroke(statusColor.opacity(0.6), lineWidth: 1.5)
-                        .frame(width: 14, height: 14)
+                        .stroke(statusColor.opacity(0.6), lineWidth: 1)
+                        .frame(width: 12, height: 12)
                         .scaleEffect(isPulsing ? 1.5 : 1.0)
                         .opacity(isPulsing ? 0.0 : 0.8)
                         .animation(
@@ -115,10 +115,10 @@ struct SessionRowView: View {
                 }
                 Circle()
                     .fill(statusColor)
-                    .frame(width: 10, height: 10)
+                    .frame(width: 8, height: 8)
                     .scaleEffect(session.needsAttention && isFlashing ? 1.6 : 1.0)
             }
-            .frame(width: 24, height: 24)
+            .frame(width: 18, height: 18)
             .onAppear {
                 if session.needsAttention { isPulsing = true }
             }
@@ -126,17 +126,18 @@ struct SessionRowView: View {
                 isPulsing = newValue
             }
 
-            VStack(alignment: .leading, spacing: 2) {
-                HStack {
-                    Text(session.projectName)
-                        .font(.system(size: 12, weight: .bold))
+            VStack(alignment: .leading, spacing: 1) {
+                HStack(spacing: 4) {
+                    Text(session.projectName.count > 12 ? String(session.projectName.prefix(12)) + "…" : session.projectName)
+                        .font(.system(size: 11, weight: .bold))
                         .foregroundColor(session.needsAttention && isFlashing ? .red : .white)
                         .underline(isHovered)
-                    Spacer()
+                        .lineLimit(1)
+                    Spacer(minLength: 4)
                     Text(session.status.rawValue)
-                        .font(.system(size: 10, weight: .bold))
+                        .font(.system(size: 9, weight: .bold))
                         .foregroundColor(statusColor)
-                        .padding(.horizontal, 6)
+                        .padding(.horizontal, 4)
                         .padding(.vertical, 1)
                         .background(
                             Capsule().fill(statusColor.opacity(0.15))
@@ -144,13 +145,13 @@ struct SessionRowView: View {
                 }
 
                 Text(session.statusDetail)
-                    .font(.system(size: 10))
+                    .font(.system(size: 9))
                     .foregroundColor(.white.opacity(0.5))
                     .lineLimit(1)
             }
         }
-        .padding(.horizontal, 14)
-        .padding(.vertical, 10)
+        .padding(.horizontal, 10)
+        .padding(.vertical, 6)
         .background(
             session.needsAttention
                 ? (isFlashing ? Color.red.opacity(0.2) : Color.red.opacity(0.08))
