@@ -168,7 +168,7 @@ struct SessionRowView: View {
         case .waiting: return Color(red: 1.0, green: 0.23, blue: 0.19)
         case .idle: return session.needsAttention
             ? Color(red: 1.0, green: 0.4, blue: 0.1)  // Orange-red when needs attention
-            : Color(red: 1.0, green: 0.84, blue: 0.04) // Yellow otherwise
+            : Color(red: 0.2, green: 0.5, blue: 1.0)   // Blue otherwise
         case .unknown: return Color.gray
         }
     }
